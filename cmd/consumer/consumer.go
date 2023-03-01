@@ -93,8 +93,7 @@ func Consume(ctx context.Context) (map[string]chan eventcounter.MessageConsumed,
 		return nil, errors.New("Canal está fechado")
 	}
 
-	done := make(chan error)
-	SetupCloseHandler(channel, done)
+	SetupCloseHandler(channel)
 
 	typeChannels := make(map[string]chan eventcounter.MessageConsumed)
 	typeCounters := make(map[string]map[string]int)
@@ -102,57 +101,48 @@ func Consume(ctx context.Context) (map[string]chan eventcounter.MessageConsumed,
 	var timestamp int64
 	for {
 		msgs, err := channel.Consume(QueueName, "", true, false, false, false, nil)
-		if err != nil {
-			log.Printf("Falha ao receber mensagem do rabbitMQ: %s", err)
+		msg := <-msgs
+
+		if err != nil || msgs == nil || msg.RoutingKey == "" {
 			select {
 			case <-ctx.Done():
-				timestamp = 0
 				return typeChannels, nil
 			default:
 				time.Sleep(1 * time.Second)
 				timestamp++
+				log.Printf("Connection idle por %d segundos", timestamp)
 				if timestamp == 5 {
-					if err := Shutdown(channel, done); err != nil {
+					if err := Shutdown(channel); err != nil {
 						log.Fatalf("Erro ao desligar: %s", err)
 					}
+					return typeChannels, nil
 				}
 				continue
 			}
 		}
+		timestamp = 0
 
 		// Processar as mensagens em concorrência
 		for i := 0; i < runtime.NumCPU(); i++ {
 			wg.Add(1)
-			go handleMessage(msgs, done, typeChannels, typeCounters, &wg)
+			go handleMessage(msgs, typeChannels, typeCounters, &wg)
 		}
 
 		select {
 		case <-ctx.Done():
-			// Espera a queue fechar
+			// Esperar todas as rotinas terminarem
+			log.Println("Processamento finalizado.")
 			wg.Wait()
 			return typeChannels, nil
 		default:
 		}
 	}
-	
-	log.Println("Processamento finalizado.")
-	// Esperar todas as rotinas terminarem
-
-	return typeChannels, nil
 }
 
-func handleMessage(msgs <-chan amqp091.Delivery, done chan error, typeChannels map[string]chan eventcounter.MessageConsumed, typeCounters map[string]map[string]int, wg *sync.WaitGroup) {
+func handleMessage(msgs <-chan amqp091.Delivery, typeChannels map[string]chan eventcounter.MessageConsumed, typeCounters map[string]map[string]int, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	cleanup := func() {
-		log.Printf("Fechar canal das mensagens")
-		done <- nil
-	}
-
-	defer cleanup()
-
 	for msg := range msgs {
-
 		var message *eventcounter.MessageConsumed
 		if err := json.Unmarshal(msg.Body, &message); err != nil {
 			log.Printf("Falha ao decodificar a mensagem: %s", err)
@@ -177,20 +167,20 @@ func handleMessage(msgs <-chan amqp091.Delivery, done chan error, typeChannels m
 	}
 }
 
-func SetupCloseHandler(channel *amqp091.Channel, done chan error) {
+func SetupCloseHandler(channel *amqp091.Channel) {
 	c := make(chan os.Signal, 2)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c
 		log.Printf("Ctrl+C pressionado no Terminal")
-		if err := Shutdown(channel, done); err != nil {
+		if err := Shutdown(channel); err != nil {
 			log.Fatalf("Erro ao desligar: %s", err)
 		}
 		os.Exit(0)
 	}()
 }
 
-func Shutdown(channel *amqp091.Channel, done chan error) error {
+func Shutdown(channel *amqp091.Channel) error {
 	if err := channel.Cancel("", true); err != nil {
 		return fmt.Errorf("Cancelamento do consumer falhou: %s", err)
 	}
@@ -202,5 +192,5 @@ func Shutdown(channel *amqp091.Channel, done chan error) error {
 	defer log.Printf("AMQP desligando OK")
 
 	// espera pelo handleMessage() sair
-	return <-done
+	return nil
 }

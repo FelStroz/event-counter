@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"flag"
-	eventcounter "github.com/reb-felipe/eventcounter/pkg"
 	"log"
-	"sync"
 )
 
 var (
@@ -45,18 +43,18 @@ func main() {
 			log.Printf("can't consume any message, err: %s", err.Error())
 		}
 
-		var wg sync.WaitGroup
+		//var wg sync.WaitGroup
 		for _, ch := range msgs {
-			wg.Add(1)
-			go func(channel chan eventcounter.MessageConsumed) {
-				defer wg.Done()
-				if count {
-					Write(outputDir, channel)
-				}
-			}(ch)
+			//wg.Add(1)
+			//go func(channel chan eventcounter.MessageConsumed) {
+			//	defer wg.Done()
+			if count {
+				Write(outputDir, ch)
+			}
+			//}(ch)
 		}
 
-		wg.Wait()
+		//wg.Wait()
 		cancel()
 	}
 }
