@@ -13,3 +13,9 @@ type Message struct {
 	EventType EventType `json:"event_type"`
 	UserID    string    `json:"user_id"`
 }
+
+type MessageConsumed struct {
+	Id        string `json:"id"`
+	User      string `json:"user"`
+	EventType string `json:"eventType"`
+}
