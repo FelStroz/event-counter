@@ -22,7 +22,7 @@ var (
 )
 
 func init() {
-	flag.BoolVar(&count, "count", false, "Cria resumo das mensagens geradas")
+	flag.BoolVar(&count, "count", true, "Cria resumo das mensagens geradas")
 	flag.BoolVar(&consume, "consume", true, "Consome as mensagens do rabbitmq")
 	flag.StringVar(&outputDir, "count-out", ".", "Caminho de saida do resumo")
 	flag.IntVar(&size, "size", 20, "Quantidade de mensagens a serem lidas por vez")
@@ -30,13 +30,12 @@ func init() {
 	flag.StringVar(&amqpExchange, "amqp-exchange", "eventcountertest", "Exchange do RabbitMQ")
 	flag.BoolVar(&declareQueue, "amqp-declare-queue", true, "Declare fila no RabbitMQ")
 	flag.IntVar(&lifetime, "lifetime", 5, "Tempo de vida do processo antes de ser encerrado (0s=infinite)")
-	flag.Parse()
 }
 
 func main() {
+	flag.Parse()
 	if consume {
 		wg := &sync.WaitGroup{}
-		wg.Add(1)
 		consumerInstance := NewConsumer()
 		consumer := &eventcounter.ConsumerWrapper{
 			Consumer: consumerInstance,
@@ -45,8 +44,6 @@ func main() {
 		if err := consumerInstance.SetConsumerConnection(); err != nil {
 			log.Fatalf("can`t set consumer connection, err: %s", err.Error())
 		}
-
-		wg.Wait()
 
 		if declareQueue {
 			if err := consumerInstance.Declare(); err != nil {
@@ -62,7 +59,6 @@ func main() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 
-		wg.Add(4)
 		go func() {
 			if err := consumerInstance.Consume(ctx, wg); err != nil {
 				log.Fatalf("can't consume any message, err: %s", err.Error())

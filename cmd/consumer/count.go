@@ -10,6 +10,7 @@ import (
 )
 
 func Write(path string, counter map[eventcounter.EventType]map[string]int) error {
+	log.Print("Escrevendo nos arquivos")
 	for k, v := range counter {
 		file, err := os.Create(fmt.Sprintf("%s/%s-consumer.json", path, k))
 		if err != nil {
@@ -28,6 +29,7 @@ func Write(path string, counter map[eventcounter.EventType]map[string]int) error
 			log.Printf("can't write data for file %s-consumer.json, err: %s", k, err)
 			return err
 		}
+		log.Printf("%v", v)
 	}
 
 	return nil

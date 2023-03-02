@@ -23,29 +23,27 @@ const (
 )
 
 type Consumer struct {
-	Conn     *amqp091.Connection
-	Channel  *amqp091.Channel
-	Mt       *sync.RWMutex
-	Channels map[eventcounter.EventType]chan eventcounter.MessageConsumed
-	Counters map[eventcounter.EventType]map[string]int
+	Conn          *amqp091.Connection
+	Channel       *amqp091.Channel
+	Mt            *sync.RWMutex
+	Channels      map[eventcounter.EventType]chan eventcounter.MessageConsumed
+	Counters      map[eventcounter.EventType]map[string]int
+	CheckMessages map[string]bool
 }
 
 func NewConsumer() *Consumer {
 	return &Consumer{
-		Conn:     &amqp091.Connection{},
-		Channel:  &amqp091.Channel{},
-		Mt:       &sync.RWMutex{},
-		Channels: make(map[eventcounter.EventType]chan eventcounter.MessageConsumed),
-		Counters: make(map[eventcounter.EventType]map[string]int),
+		Conn:          &amqp091.Connection{},
+		Channel:       &amqp091.Channel{},
+		Mt:            &sync.RWMutex{},
+		Channels:      make(map[eventcounter.EventType]chan eventcounter.MessageConsumed),
+		Counters:      make(map[eventcounter.EventType]map[string]int),
+		CheckMessages: make(map[string]bool),
 	}
 }
 
 func (c *Consumer) SetConsumerConnection() error {
 	var err error
-	if c.Channel != nil && !c.Channel.IsClosed() {
-		return nil
-	}
-
 	c.Conn, err = amqp091.Dial(amqpUrl)
 	if err != nil {
 		return err
@@ -63,6 +61,7 @@ func (c *Consumer) SetConsumerConnection() error {
 	if c.Channel.IsClosed() {
 		return errors.New("Canal fechado")
 	}
+
 	return nil
 }
 
@@ -106,13 +105,14 @@ func (c *Consumer) Consume(ctx context.Context, wg *sync.WaitGroup) error {
 		select {
 		case <-ctx.Done():
 			cancel()
+			log.Print("Queue vazia por mais de 5 segundos! Retornando")
 			if err := c.Shutdown(); err != nil {
 				log.Printf("Erro ao encerrar o canal, err: %v", err)
 			}
 			return nil
 		case msg := <-msgs:
 			cancel()
-			ctx, cancel = context.WithTimeout(context.Background(), time.Second*5)
+			ctx, cancel = context.WithTimeout(context.Background(), time.Second*time.Duration(lifetime))
 			wg.Add(1)
 			go c.handleMessage(msg, wg)
 		default:
@@ -123,7 +123,6 @@ func (c *Consumer) Consume(ctx context.Context, wg *sync.WaitGroup) error {
 func (c *Consumer) handleMessage(msg amqp091.Delivery, wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	checkMessages := make(map[string]bool)
 	var message *eventcounter.MessageConsumed
 	if err := json.Unmarshal(msg.Body, &message); err != nil {
 		log.Printf("Falha ao decodificar a mensagem: %s", err)
@@ -133,7 +132,7 @@ func (c *Consumer) handleMessage(msg amqp091.Delivery, wg *sync.WaitGroup) {
 	message.User = msg.RoutingKey[0:strings.Index(msg.RoutingKey, ".")]
 	message.EventType = eventcounter.EventType(msg.RoutingKey[strings.LastIndex(msg.RoutingKey, ".")+1:])
 
-	if ok := checkMessages[message.Id]; !ok {
+	if ok := c.CheckMessages[message.Id]; !ok {
 		// Se a mensagem não foi processada ainda, ela é enviada para o canal correspondente
 		c.Mt.Lock()
 		if _, ok := c.Channels[message.EventType]; !ok {
@@ -145,10 +144,10 @@ func (c *Consumer) handleMessage(msg amqp091.Delivery, wg *sync.WaitGroup) {
 		c.Mt.Unlock()
 
 		ch <- *message
-
 		c.Mt.Lock()
-		checkMessages[message.Id] = true
+		c.CheckMessages[message.Id] = true
 		c.Mt.Unlock()
+		log.Printf("Evento %s emitido com o usuário %s", message.EventType, message.User)
 	}
 }
 
@@ -174,7 +173,7 @@ func (c *Consumer) Shutdown() error {
 		return fmt.Errorf("AMQP erro de conexão: %s", err)
 	}
 
-	defer log.Printf("AMQP desligando OK")
+	log.Printf("AMQP desligando OK")
 
 	// espera pelo handleMessage() sair
 	return nil
@@ -184,21 +183,39 @@ func (c *Consumer) Shutdown() error {
 
 func (c *Consumer) Created(ctx context.Context, uid string) error {
 	msg := ctx.Value("msg").(eventcounter.MessageConsumed)
-	c.Counters[msg.EventType][msg.User]++
-	log.Printf("Evento %s emitido com o usuário %s", msg.EventType, msg.User)
+	c.Mt.Lock()
+	defer c.Mt.Unlock()
+	if _, ok := c.Counters[msg.EventType]; !ok {
+		c.Counters[msg.EventType] = make(map[string]int)
+	}
+	if c.CheckMessages[uid] {
+		c.Counters[msg.EventType][msg.User]++
+	}
 	return nil
 }
 
 func (c *Consumer) Updated(ctx context.Context, uid string) error {
 	msg := ctx.Value("msg").(eventcounter.MessageConsumed)
-	c.Counters[msg.EventType][msg.User]++
-	log.Printf("Evento %s emitido com o usuário %s", msg.EventType, msg.User)
+	c.Mt.Lock()
+	defer c.Mt.Unlock()
+	if _, ok := c.Counters[msg.EventType]; !ok {
+		c.Counters[msg.EventType] = make(map[string]int)
+	}
+	if c.CheckMessages[uid] {
+		c.Counters[msg.EventType][msg.User]++
+	}
 	return nil
 }
 
 func (c *Consumer) Deleted(ctx context.Context, uid string) error {
 	msg := ctx.Value("msg").(eventcounter.MessageConsumed)
-	c.Counters[msg.EventType][msg.User]++
-	log.Printf("Evento %s emitido com o usuário %s", msg.EventType, msg.User)
+	c.Mt.Lock()
+	defer c.Mt.Unlock()
+	if _, ok := c.Counters[msg.EventType]; !ok {
+		c.Counters[msg.EventType] = make(map[string]int)
+	}
+	if c.CheckMessages[uid] {
+		c.Counters[msg.EventType][msg.User]++
+	}
 	return nil
 }
