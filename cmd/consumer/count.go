@@ -29,8 +29,7 @@ func Write(path string, counter map[eventcounter.EventType]map[string]int) error
 			log.Printf("can't write data for file %s-consumer.json, err: %s", k, err)
 			return err
 		}
-		log.Printf("%v", v)
 	}
-
+	log.Print("Escrita finalizada!")
 	return nil
 }

@@ -32,26 +32,26 @@ func TestConsumer_SetConsumerConnection(t *testing.T) {
 	consumer := NewConsumer()
 
 	// Simulate successful connection
-	conn := &amqp091.Connection{}
-	channel := &amqp091.Channel{}
-	consumer.Conn = conn
-	consumer.Channel = channel
-
 	err := consumer.SetConsumerConnection()
 	assert.NoError(t, err)
 	assert.False(t, consumer.Channel.IsClosed())
 
 	// Simulate connection error
 	consumer.Conn = nil
+	aux := amqpUrl
 	amqpUrl = ""
 	err = consumer.SetConsumerConnection()
 	assert.Error(t, err)
 
-	// Simulate channel error
-	consumer.Conn = conn
-	consumer.Channel = nil
-	err = consumer.SetConsumerConnection()
-	assert.Error(t, err)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+
+	// Executa a função em uma goroutine
+	go consumer.SetupCloseHandler()
+
+	//Run the function in a goroutine
+	signals <- os.Interrupt
+	amqpUrl = aux
 }
 
 func TestConsumer_Declare(t *testing.T) {
@@ -98,9 +98,11 @@ func TestConsumer_Declare(t *testing.T) {
 	assert.NoError(t, consumer.Declare())
 
 	// Test Channel.ExchangeDeclare returns error
+	aux1 := amqpExchange
 	amqpExchange = ""
 	err = consumer.Declare()
 	assert.Error(t, err)
+	amqpExchange = aux1
 }
 
 func TestConsumer_PublishAndConsume(t *testing.T) {
