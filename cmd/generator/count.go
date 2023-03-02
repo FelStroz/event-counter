@@ -3,9 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	eventcounter "github.com/reb-felipe/eventcounter/pkg"
 	"log"
 	"os"
+
+	eventcounter "github.com/reb-felipe/eventcounter/pkg"
 )
 
 func CountMessages(msgs []*eventcounter.Message) map[eventcounter.EventType]map[string]int {
