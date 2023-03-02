@@ -3,7 +3,11 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	eventcounter "github.com/reb-felipe/eventcounter/pkg"
 	"log"
+	"sync"
+	"time"
 )
 
 var (
@@ -36,25 +40,47 @@ func main() {
 				log.Printf("can`t declare queue or exchange, err: %s", err.Error())
 			}
 		}
-		ctx, cancel := context.WithCancel(context.Background())
 
-		msgs, err := Consume(ctx)
-		if err != nil {
-			log.Printf("can't consume any message, err: %s", err.Error())
+		typeChannels := map[eventcounter.EventType]chan eventcounter.MessageConsumed{
+			eventcounter.EventCreated: make(chan eventcounter.MessageConsumed),
+			eventcounter.EventDeleted: make(chan eventcounter.MessageConsumed),
+			eventcounter.EventUpdated: make(chan eventcounter.MessageConsumed),
 		}
 
-		//var wg sync.WaitGroup
-		for _, ch := range msgs {
-			//wg.Add(1)
-			//go func(channel chan eventcounter.MessageConsumed) {
-			//	defer wg.Done()
-			if count {
-				Write(outputDir, ch)
+		ctx, _ := context.WithCancel(context.Background())
+		wg := &sync.WaitGroup{}
+		go func() {
+			if err := Consume(ctx, typeChannels, wg); err != nil {
+				log.Printf("can't consume any message, err: %s", err.Error())
 			}
-			//}(ch)
-		}
+		}()
 
-		//wg.Wait()
-		cancel()
+		go func() {
+			for created := range typeChannels[eventcounter.EventCreated] {
+				fmt.Println("created", created)
+			}
+		}()
+
+		go func() {
+			for deleted := range typeChannels[eventcounter.EventDeleted] {
+				fmt.Println("deleted", deleted)
+			}
+		}()
+
+		go func() {
+			for updated := range typeChannels[eventcounter.EventUpdated] {
+				fmt.Println("updated", updated)
+			}
+		}()
+
+		time.Sleep(10 * time.Second)
+		wg.Wait()
+		//for _, ch := range msgs {
+		//	if count {
+		//		Write(outputDir, ch)
+		//	}
+		//}
+
+		//cancel()
 	}
 }

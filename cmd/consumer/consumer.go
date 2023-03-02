@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -82,88 +81,72 @@ func Declare() error {
 	return nil
 }
 
-func Consume(ctx context.Context) (map[string]chan eventcounter.MessageConsumed, error) {
-	wg := sync.WaitGroup{}
+func Consume(ctx context.Context, typeChannels map[eventcounter.EventType]chan eventcounter.MessageConsumed, wg *sync.WaitGroup) error {
 	channel, err := getChannel()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if channel.IsClosed() {
-		return nil, errors.New("Canal está fechado")
+		return errors.New("Canal está fechado")
 	}
 
 	SetupCloseHandler(channel)
 
-	typeChannels := make(map[string]chan eventcounter.MessageConsumed)
-	typeCounters := make(map[string]map[string]int)
+	typeCounters := make(map[eventcounter.EventType]map[string]int)
+	mt := &sync.RWMutex{}
+	msgs, err := channel.Consume(QueueName, "", true, false, false, false, nil)
+	if err != nil {
+		panic(err)
+	}
 
-	var timestamp int64
+	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
 	for {
-		msgs, err := channel.Consume(QueueName, "", true, false, false, false, nil)
-		msg := <-msgs
-
-		if err != nil || msgs == nil || msg.RoutingKey == "" {
-			select {
-			case <-ctx.Done():
-				return typeChannels, nil
-			default:
-				time.Sleep(1 * time.Second)
-				timestamp++
-				log.Printf("Connection idle por %d segundos", timestamp)
-				if timestamp == 5 {
-					if err := Shutdown(channel); err != nil {
-						log.Fatalf("Erro ao desligar: %s", err)
-					}
-					return typeChannels, nil
-				}
-				continue
-			}
-		}
-		timestamp = 0
-
-		// Processar as mensagens em concorrência
-		for i := 0; i < runtime.NumCPU(); i++ {
-			wg.Add(1)
-			go handleMessage(msgs, typeChannels, typeCounters, &wg)
-		}
-
 		select {
 		case <-ctx.Done():
-			// Esperar todas as rotinas terminarem
-			log.Println("Processamento finalizado.")
-			wg.Wait()
-			return typeChannels, nil
+			cancel()
+			return nil
+		case msg := <-msgs:
+			log.Print(msg)
+			cancel()
+			ctx, cancel = context.WithTimeout(context.Background(), time.Second*5)
+			wg.Add(1)
+			go handleMessage(msg, typeChannels, typeCounters, mt, wg)
 		default:
 		}
 	}
 }
 
-func handleMessage(msgs <-chan amqp091.Delivery, typeChannels map[string]chan eventcounter.MessageConsumed, typeCounters map[string]map[string]int, wg *sync.WaitGroup) {
+func handleMessage(msg amqp091.Delivery, typeChannels map[eventcounter.EventType]chan eventcounter.MessageConsumed, typeCounters map[eventcounter.EventType]map[string]int, mt *sync.RWMutex, wg *sync.WaitGroup) {
 	defer wg.Done()
+	var message *eventcounter.MessageConsumed
+	if err := json.Unmarshal(msg.Body, &message); err != nil {
+		log.Printf("Falha ao decodificar a mensagem: %s", err)
+		return
+	}
 
-	for msg := range msgs {
-		var message *eventcounter.MessageConsumed
-		if err := json.Unmarshal(msg.Body, &message); err != nil {
-			log.Printf("Falha ao decodificar a mensagem: %s", err)
-			continue
+	message.User = msg.RoutingKey[0:strings.Index(msg.RoutingKey, ".")]
+	message.EventType = eventcounter.EventType(msg.RoutingKey[strings.LastIndex(msg.RoutingKey, ".")+1:])
+
+	if processed, ok := typeCounters[message.EventType][message.Id]; !ok {
+		// Se a mensagem não foi processada ainda, ela é enviada para o canal correspondente
+		mt.Lock()
+		if _, ok := typeChannels[message.EventType]; !ok {
+			// Criar um novo canal para este tipo de evento
+			typeChannels[message.EventType] = make(chan eventcounter.MessageConsumed, 0)
 		}
 
-		message.User = msg.RoutingKey[0:strings.Index(msg.RoutingKey, ".")]
-		message.EventType = msg.RoutingKey[strings.LastIndex(msg.RoutingKey, ".")+1:]
-		mapMutex := sync.RWMutex{}
-		if processed, ok := typeCounters[message.EventType][message.Id]; !ok {
-			// Se a mensagem não foi processada ainda, ela é enviada para o canal correspondente
-			if _, ok := typeChannels[message.EventType]; !ok {
-				// Criar um novo canal para este tipo de evento
-				typeChannels[message.EventType] = make(chan eventcounter.MessageConsumed, 0)
-				typeCounters[message.EventType] = make(map[string]int)
-			}
-			typeChannels[message.EventType] <- *message
-			mapMutex.Lock()
-			typeCounters[message.EventType][message.Id] = processed
-			mapMutex.Unlock()
+		if _, ok := typeCounters[message.EventType]; !ok {
+			typeCounters[message.EventType] = make(map[string]int)
 		}
+
+		ch := typeChannels[message.EventType]
+		mt.Unlock()
+		ch <- *message
+
+		mt.Lock()
+		typeCounters[message.EventType][message.Id] = processed
+		mt.Unlock()
 	}
 }
 
