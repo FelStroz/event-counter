@@ -25,10 +25,11 @@ func init() {
 	flag.StringVar(&amqpUrl, "amqp-url", "amqp://guest:guest@localhost:5672", "URL do RabbitMQ")
 	flag.StringVar(&amqpExchange, "amqp-exchange", "user-events", "Exchange do RabbitMQ")
 	flag.BoolVar(&declareQueue, "amqp-declare-queue", false, "Declare fila no RabbitMQ")
-	flag.Parse()
+
 }
 
 func main() {
+	flag.Parse()
 	msgs := make([]*eventcounter.Message, size)
 	for i := range msgs {
 		msgs[i] = NewMessage()
