@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	amqp091 "github.com/rabbitmq/amqp091-go"
-	eventcounter "github.com/reb-felipe/eventcounter/pkg"
 	"log"
 	"os"
 	"os/signal"
@@ -14,6 +12,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	amqp091 "github.com/rabbitmq/amqp091-go"
+	eventcounter "github.com/reb-felipe/eventcounter/pkg"
 )
 
 const (
@@ -21,58 +22,65 @@ const (
 	Key       string = "*.event.*"
 )
 
-var (
-	conn    *amqp091.Connection
-	channel *amqp091.Channel
-)
-
-func getChannel() (*amqp091.Channel, error) {
-	var err error
-	if channel != nil && !channel.IsClosed() {
-		return channel, nil
-	}
-
-	conn, err = amqp091.Dial(amqpUrl)
-	if err != nil {
-		return nil, err
-	}
-
-	channel, err := conn.Channel()
-	if err != nil {
-		return nil, err
-	}
-
-	go func() {
-		log.Printf("Canal fechado, err: %s", <-channel.NotifyClose(make(chan *amqp091.Error, 2)))
-	}()
-
-	if channel.IsClosed() {
-		return nil, errors.New("Canal fechado")
-	}
-
-	return channel, nil
+type Consumer struct {
+	Conn     *amqp091.Connection
+	Channel  *amqp091.Channel
+	Mt       *sync.RWMutex
+	Channels map[eventcounter.EventType]chan eventcounter.MessageConsumed
+	Counters map[eventcounter.EventType]map[string]int
 }
 
-func Declare() error {
-	channel, err := getChannel()
+func NewConsumer() *Consumer {
+	return &Consumer{
+		Conn:     &amqp091.Connection{},
+		Channel:  &amqp091.Channel{},
+		Mt:       &sync.RWMutex{},
+		Channels: make(map[eventcounter.EventType]chan eventcounter.MessageConsumed),
+		Counters: make(map[eventcounter.EventType]map[string]int),
+	}
+}
+
+func (c *Consumer) SetConsumerConnection() error {
+	var err error
+	if c.Channel != nil && !c.Channel.IsClosed() {
+		return nil
+	}
+
+	c.Conn, err = amqp091.Dial(amqpUrl)
 	if err != nil {
 		return err
 	}
 
-	if err := channel.ExchangeDeclare(amqpExchange, "topic", true, false, false, false, nil); err != nil {
+	c.Channel, err = c.Conn.Channel()
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		log.Printf("Canal fechado, err: %s", <-c.Channel.NotifyClose(make(chan *amqp091.Error, 2)))
+	}()
+
+	if c.Channel.IsClosed() {
+		return errors.New("Canal fechado")
+	}
+	return nil
+}
+
+func (c *Consumer) Declare() error {
+	if err := c.Channel.ExchangeDeclare(amqpExchange, "topic", true, false, false, false, nil); err != nil {
 		return err
 	}
 
 	log.Printf("Exchange declarada, declarando Queue %q", QueueName)
 
-	queue, err := channel.QueueDeclare(QueueName, true, false, false, false, nil)
+	queue, err := c.Channel.QueueDeclare(QueueName, true, false, false, false, nil)
 	if err != nil {
 		return err
 	}
 
 	log.Printf("Queue: (%q %d messages, %d consumers), Exchange sendo escolhida (key %q)", "eventcountertest", queue.Messages, queue.Consumers, Key)
 
-	if err := channel.QueueBind(QueueName, Key, amqpExchange, false, nil); err != nil {
+	if err := c.Channel.QueueBind(QueueName, Key, amqpExchange, false, nil); err != nil {
 		return err
 	}
 
@@ -81,21 +89,14 @@ func Declare() error {
 	return nil
 }
 
-func Consume(ctx context.Context, typeChannels map[eventcounter.EventType]chan eventcounter.MessageConsumed, wg *sync.WaitGroup) error {
-	channel, err := getChannel()
-	if err != nil {
-		return err
-	}
-
-	if channel.IsClosed() {
+func (c *Consumer) Consume(ctx context.Context, wg *sync.WaitGroup) error {
+	if c.Channel.IsClosed() {
 		return errors.New("Canal está fechado")
 	}
 
-	SetupCloseHandler(channel)
+	c.SetupCloseHandler()
 
-	typeCounters := make(map[eventcounter.EventType]map[string]int)
-	mt := &sync.RWMutex{}
-	msgs, err := channel.Consume(QueueName, "", true, false, false, false, nil)
+	msgs, err := c.Channel.Consume(QueueName, "", true, false, false, false, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -105,20 +106,24 @@ func Consume(ctx context.Context, typeChannels map[eventcounter.EventType]chan e
 		select {
 		case <-ctx.Done():
 			cancel()
+			if err := c.Shutdown(); err != nil {
+				log.Printf("Erro ao encerrar o canal, err: %v", err)
+			}
 			return nil
 		case msg := <-msgs:
-			log.Print(msg)
 			cancel()
 			ctx, cancel = context.WithTimeout(context.Background(), time.Second*5)
 			wg.Add(1)
-			go handleMessage(msg, typeChannels, typeCounters, mt, wg)
+			go c.handleMessage(msg, wg)
 		default:
 		}
 	}
 }
 
-func handleMessage(msg amqp091.Delivery, typeChannels map[eventcounter.EventType]chan eventcounter.MessageConsumed, typeCounters map[eventcounter.EventType]map[string]int, mt *sync.RWMutex, wg *sync.WaitGroup) {
+func (c *Consumer) handleMessage(msg amqp091.Delivery, wg *sync.WaitGroup) {
 	defer wg.Done()
+
+	checkMessages := make(map[string]bool)
 	var message *eventcounter.MessageConsumed
 	if err := json.Unmarshal(msg.Body, &message); err != nil {
 		log.Printf("Falha ao decodificar a mensagem: %s", err)
@@ -128,52 +133,72 @@ func handleMessage(msg amqp091.Delivery, typeChannels map[eventcounter.EventType
 	message.User = msg.RoutingKey[0:strings.Index(msg.RoutingKey, ".")]
 	message.EventType = eventcounter.EventType(msg.RoutingKey[strings.LastIndex(msg.RoutingKey, ".")+1:])
 
-	if processed, ok := typeCounters[message.EventType][message.Id]; !ok {
+	if ok := checkMessages[message.Id]; !ok {
 		// Se a mensagem não foi processada ainda, ela é enviada para o canal correspondente
-		mt.Lock()
-		if _, ok := typeChannels[message.EventType]; !ok {
+		c.Mt.Lock()
+		if _, ok := c.Channels[message.EventType]; !ok {
 			// Criar um novo canal para este tipo de evento
-			typeChannels[message.EventType] = make(chan eventcounter.MessageConsumed, 0)
+			c.Channels[message.EventType] = make(chan eventcounter.MessageConsumed, 0)
 		}
 
-		if _, ok := typeCounters[message.EventType]; !ok {
-			typeCounters[message.EventType] = make(map[string]int)
-		}
+		ch := c.Channels[message.EventType]
+		c.Mt.Unlock()
 
-		ch := typeChannels[message.EventType]
-		mt.Unlock()
 		ch <- *message
 
-		mt.Lock()
-		typeCounters[message.EventType][message.Id] = processed
-		mt.Unlock()
+		c.Mt.Lock()
+		checkMessages[message.Id] = true
+		c.Mt.Unlock()
 	}
 }
 
-func SetupCloseHandler(channel *amqp091.Channel) {
-	c := make(chan os.Signal, 2)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+func (c *Consumer) SetupCloseHandler() {
+	s := make(chan os.Signal, 2)
+	signal.Notify(s, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-c
+		<-s
 		log.Printf("Ctrl+C pressionado no Terminal")
-		if err := Shutdown(channel); err != nil {
+		if err := c.Shutdown(); err != nil {
 			log.Fatalf("Erro ao desligar: %s", err)
 		}
 		os.Exit(0)
 	}()
 }
 
-func Shutdown(channel *amqp091.Channel) error {
-	if err := channel.Cancel("", true); err != nil {
+func (c *Consumer) Shutdown() error {
+	if err := c.Channel.Cancel("", true); err != nil {
 		return fmt.Errorf("Cancelamento do consumer falhou: %s", err)
 	}
 
-	if err := channel.Close(); err != nil {
+	if err := c.Channel.Close(); err != nil {
 		return fmt.Errorf("AMQP erro de conexão: %s", err)
 	}
 
 	defer log.Printf("AMQP desligando OK")
 
 	// espera pelo handleMessage() sair
+	return nil
+}
+
+// Métodos de contagem e controle descritos no pkg
+
+func (c *Consumer) Created(ctx context.Context, uid string) error {
+	msg := ctx.Value("msg").(eventcounter.MessageConsumed)
+	c.Counters[msg.EventType][msg.User]++
+	log.Printf("Evento %s emitido com o usuário %s", msg.EventType, msg.User)
+	return nil
+}
+
+func (c *Consumer) Updated(ctx context.Context, uid string) error {
+	msg := ctx.Value("msg").(eventcounter.MessageConsumed)
+	c.Counters[msg.EventType][msg.User]++
+	log.Printf("Evento %s emitido com o usuário %s", msg.EventType, msg.User)
+	return nil
+}
+
+func (c *Consumer) Deleted(ctx context.Context, uid string) error {
+	msg := ctx.Value("msg").(eventcounter.MessageConsumed)
+	c.Counters[msg.EventType][msg.User]++
+	log.Printf("Evento %s emitido com o usuário %s", msg.EventType, msg.User)
 	return nil
 }
