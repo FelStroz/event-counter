@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+
 	amqp091 "github.com/rabbitmq/amqp091-go"
 	eventcounter "github.com/reb-felipe/eventcounter/pkg"
-	"log"
 )
 
 var (

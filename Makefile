@@ -16,7 +16,7 @@ generator-publish: build-generator
 	bin/generator -publish=true -size=100 -amqp-url="amqp://guest:guest@localhost:$(AMQP_PORT)" -amqp-exchange="$(EXCHANGE)" -amqp-declare-queue=true
 
 generator-publish-with-resume: build-generator
-	bin/generator -publish=true -size=100 -amqp-url="amqp://guest:guest@localhost:$(AMQP_PORT)" -amqp-exchange="$(EXCHANGE)" -amqp-declare-queue=true -count=true -count-out="$(CURRENT_DIR)/data" -count=true
+	bin/generator -publish=true -size=100 -amqp-url="amqp://guest:guest@localhost:$(AMQP_PORT)" -amqp-exchange="$(EXCHANGE)" -amqp-declare-queue=true -count=true -count-out="$(CURRENT_DIR)/data"
 
 up: build-generator env-up
 
